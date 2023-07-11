@@ -6,25 +6,7 @@ import torch_scatter
 
 from torch_spsr.ext import CuckooHashTable
 from .ops import torch_unique
-from torch_spsr.bases.bezier_tensor import BezierTensorBasis
 
-
-def compute_density(xyz: torch.Tensor, voxel_size: float) -> torch.Tensor:
-    """
-    Kernel density estimation using Bezier Tensor.
-    :param xyz: (N, 3) input point cloud.
-    :param voxel_size: float, Smoothing kernel size.
-    :return: (N, ) density. Unit is roughly proportional to pts/voxel.
-    """
-    from torch_spsr.core.hashtree import HashTree
-
-    hash_tree = HashTree(xyz, voxel_size, 1)
-    hash_tree.build_encoder_hierarchy_dense(expand_range=2, uniform_density=True)
-    wd = hash_tree.splat_data(xyz, hash_tree.ENCODER, 0, check_corr=False)
-    hash_tree.reflect_decoder_coords()
-    wd = hash_tree.evaluate_interpolated(xyz, BezierTensorBasis(), None, 0, wd)
-
-    return wd
 
 
 class NeighbourMaps:
@@ -96,6 +78,7 @@ class SparseFeatureHierarchy:
         # List of torch.Tensor (Nx3)
         self._coords = [None for d in range(self.depth)]
         self._hash_table: List[CuckooHashTable] = [None for d in range(self.depth)]
+        #self.dual_graph = 
 
     @property
     def depth(self) -> int:
