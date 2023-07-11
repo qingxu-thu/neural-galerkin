@@ -87,8 +87,6 @@ class SparseFeatureHierarchy:
         self._device = device
         self._range_kernel = range_kernel
 
-        # Conv-based include same-level
-        self._conv_nmap = NeighbourMaps(self._device)
         # Region-based exclude same-level
         self._region_nmap = NeighbourMaps(self._device)
 
@@ -173,7 +171,7 @@ class SparseFeatureHierarchy:
         return stat
 
     def get_coords_neighbours(self, source_coords: torch.Tensor, source_stride: int, target_depth: int,
-                              nn_kernel: torch.Tensor, conv_based: bool = False, transposed: bool = False):
+                              nn_kernel: torch.Tensor, transposed: bool = False):
         """
         A generic interface for querying neighbourhood information. (This is without cache)
             For all source (data), find all target whose neighbourhood (in target level) covers it,
@@ -187,20 +185,16 @@ class SparseFeatureHierarchy:
         """
         assert 0 <= target_depth < self._depth
 
-        if not conv_based:
-            # Flaw: If the layers are different (source stride < target stride), you may end up with
-            #   neighbours that has no overlap support.
-            assert source_stride <= self._strides[target_depth], "Data must be deeper and has more nodes."
-            # Compute voxel center offsets.
-            quantized_source_coords = torch.div(
-                source_coords.detach() + 0.5 * source_stride, self._strides[target_depth],
-                rounding_mode='floor').int() * self._strides[target_depth]
-            c_offset = (quantized_source_coords - source_coords) / source_stride + \
-                       (self._strides[target_depth] // source_stride - 1) / 2.
-        else:
-            assert not source_coords.requires_grad
-            assert source_stride >= self._strides[target_depth], "Data must be sparser and shallower."
-            quantized_source_coords = source_coords
+        # Flaw: If the layers are different (source stride < target stride), you may end up with
+        #   neighbours that has no overlap support.
+        assert source_stride <= self._strides[target_depth], "Data must be deeper and has more nodes."
+        # Compute voxel center offsets.
+        quantized_source_coords = torch.div(
+            source_coords.detach() + 0.5 * source_stride, self._strides[target_depth],
+            rounding_mode='floor').int() * self._strides[target_depth]
+        c_offset = (quantized_source_coords - source_coords) / source_stride + \
+                    (self._strides[target_depth] // source_stride - 1) / 2.
+
 
         hash_res = self._hash_table[target_depth].query(
             quantized_source_coords, nn_kernel * self._strides[target_depth])  # (K, N)
@@ -219,15 +213,14 @@ class SparseFeatureHierarchy:
 
         neighbour_types = nn_kernel[kernel_ids]
 
-        if not conv_based:
-            neighbour_types = neighbour_types.float()
-            neighbour_types *= self._strides[target_depth] / source_stride
-            neighbour_types += c_offset[source_ids, :3]
+        neighbour_types = neighbour_types.float()
+        neighbour_types *= self._strides[target_depth] / source_stride
+        neighbour_types += c_offset[source_ids, :3]
 
         return source_ids, target_ids, neighbour_types, nbsizes
 
-    def get_self_neighbours(self, source_depth: int, target_depth: int, target_range: int,
-                            conv_based: bool = False):
+
+    def get_self_neighbours(self, source_depth: int, target_depth: int, target_range: int):
         """
         :param source_depth: source depth where you want the coord id to start from
         :param target_depth: target depth where you want the coord id to shoot to
@@ -242,13 +235,11 @@ class SparseFeatureHierarchy:
         # conv_based flag will be ignored if source-depth == target-depth, because this is anyway
         #   covered in both situations.
         inv_op = False
-        if not conv_based and source_depth != target_depth:
+        if source_depth != target_depth:
             neighbour_maps = self._region_nmap
             # In the case where source is shallower/fewer than target, we inverse the operation
             if source_depth > target_depth:
                 source_depth, target_depth, inv_op = target_depth, source_depth, True
-        else:
-            neighbour_maps = self._conv_nmap
 
         def recover_inv_op(inv_src_ids, inv_tgt_ids, inv_nts, inv_nbs):
             if not inv_op:
@@ -273,7 +264,7 @@ class SparseFeatureHierarchy:
         neighbour_kernel = neighbour_kernel[starting_lap:]
 
         source_ids, target_ids, neighbour_types, nbsizes = self.get_coords_neighbours(
-            tree_coords[source_depth], tree_strides[source_depth], target_depth, neighbour_kernel, conv_based
+            tree_coords[source_depth], tree_strides[source_depth], target_depth, neighbour_kernel
         )
 
         if exist_src is not None:
@@ -301,7 +292,7 @@ class SparseFeatureHierarchy:
         from torch_spsr.core.hashtree import VoxelStatus
         status = torch.full((coords.size(0),), VoxelStatus.VS_NON_EXIST.value, dtype=torch.long, device=coords.device)
         sidx, _, _, _ = self.get_coords_neighbours(
-            coords, self._strides[depth], depth, self._identity_kernel(), conv_based=True)
+            coords, self._strides[depth], depth, self._identity_kernel())
         status[sidx] = VoxelStatus.VS_EXIST_STOP.value
 
         if depth > 0:
@@ -310,7 +301,7 @@ class SparseFeatureHierarchy:
                               self._strides[depth - 1]
             conform_coords = (coords[sidx].unsqueeze(dim=1).repeat(1, 8, 1) + conform_offsets.unsqueeze(0)).view(-1, 3)
             qidx, _, _, _ = self.get_coords_neighbours(
-                conform_coords, self._strides[depth - 1], depth - 1, self._identity_kernel(), conv_based=True)
+                conform_coords, self._strides[depth - 1], depth - 1, self._identity_kernel())
             qidx = torch.div(qidx, 8, rounding_mode='floor')
             status[sidx[qidx]] = VoxelStatus.VS_EXIST_CONTINUE.value
 
